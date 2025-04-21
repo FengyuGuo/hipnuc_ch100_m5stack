@@ -1,17 +1,10 @@
-/*
-  please add TinyGPSPlus to your library first........
-  TinyGPSPlus file in M5stack lib examples -> modules -> GPS ->
-  TinyGPSPlus-1.0.2.zip
-*/
-
 #include <M5Stack.h>
+#include "freertos/FreeRTOS.h"
+#include "esp_timer.h"
 
 #define FRAME_HEAD1 0x5A
 #define FRAME_HEAD2 0xA5
-
 #define IMU_DATA_LENGTH 82
-
-HardwareSerial IMURaw(2);
 
 struct __attribute__((__packed__)) HipNucIMU
 {
@@ -26,6 +19,27 @@ struct __attribute__((__packed__)) HipNucIMU
     float eul[3];
     float quat[4];
 };
+enum ParseState {
+  WAIT_FOR_HEADER1, WAIT_FOR_HEADER2,
+  READ_LENGTH1, READ_LENGTH2, 
+  READ_CHECKSUM1, READ_CHECKSUM2,
+  READ_PAYLOAD
+};
+
+QueueHandle_t imu_queue;
+
+HardwareSerial IMURaw(2);
+ParseState state = WAIT_FOR_HEADER1;
+uint8_t length1 = 0, length2 = 0;
+uint16_t length = 0;
+uint8_t buffer[100];
+uint8_t buf_index = 0;
+uint8_t crc1 = 0, crc2 = 0;
+uint16_t crc = 0, checksum = 0;
+HipNucIMU imu_data;
+char msg_str[1024];
+uint32_t wrong_frames = 0, right_frames = 0;
+int8_t batt = 0;
 
 static void crc16_update(uint16_t *currectCrc, const
             uint8_t *src, uint32_t lengthInBytes)
@@ -50,36 +64,22 @@ static void crc16_update(uint16_t *currectCrc, const
     *currectCrc = crc;
 }
 
-void setup() {
-    M5.begin();
-    M5.Power.begin();
-    IMURaw.begin(115200);
-    Serial.println("hello");
-//    termInit();
-    M5.Lcd.setTextFont(4);
-    M5.Lcd.println("IMU Raw Example");
+void reset_receive_state()
+{
+  state = WAIT_FOR_HEADER1;
+  buf_index = 0;
+  length1 = 0;
+  length2 = 0;
+  length = 0;
+  crc1 = 0;
+  crc2 = 0;
+  crc = 0;
 }
 
-enum ParseState {
-  WAIT_FOR_HEADER1, WAIT_FOR_HEADER2,
-  READ_LENGTH1, READ_LENGTH2, 
-  READ_CHECKSUM1, READ_CHECKSUM2,
-  READ_PAYLOAD
-};
-
-ParseState state = WAIT_FOR_HEADER1;
-uint8_t length1 = 0, length2 = 0;
-uint16_t length = 0;
-uint8_t buffer[100];
-uint8_t buf_index = 0;
-uint8_t crc1 = 0, crc2 = 0;
-uint16_t crc = 0, checksum = 0;
-HipNucIMU imu_data;
-char msg_str[1024];
-uint32_t wrong_frames = 0, right_frames = 0;
-
-void loop() {
+void receive_loop(void* param) {
+  Serial.println("receive loop start");
   while (IMURaw.available()) {
+//    Serial.println("enter receiver loop");
     uint8_t b = IMURaw.read();
     switch (state) {
       case WAIT_FOR_HEADER1:
@@ -146,53 +146,83 @@ void loop() {
         if (buf_index >= IMU_DATA_LENGTH) 
         {
           //check the checksum!
-
           checksum = 0;
-//          Serial.write("got imu frame\n");
           crc16_update(&checksum, buffer, 4);
           crc16_update(&checksum, buffer + 6, sizeof(HipNucIMU));
           if(crc == checksum)
           {
-//            Serial.print("crc ok\n");
             memcpy(&imu_data, &buffer[6], sizeof(HipNucIMU));
-//          Serial.printf("size of imu data: %d\n", sizeof(HipNucIMU));
-//            Serial.printf("id, tag, timestamp, gyr_x:0x%02X, %u, %u, %f\n", imu_data.tag, imu_data.id, imu_data.timestamp, imu_data.gyr[0]);
-            
+            int64_t start = esp_timer_get_time();
+            BaseType_t result = xQueueSend(imu_queue, &imu_data, 0);
+            int64_t end = esp_timer_get_time();
+//            Serial.printf("xQueueSend耗时: %lld us\n", end - start);
+//            Serial.printf("imu send %u\n", imu_data.timestamp);
+            if(result != pdPASS)
+            {
+              Serial.println("queue full, data dropped!");
+            }
             right_frames++;
           }
           else
           {
-            Serial.printf("crc wrong! 0x%04X\n", checksum);
             wrong_frames++;
           }
-
-          if((right_frames + wrong_frames) % 100 == 0)
-          {
-            Serial.printf("%u right frames got. %u wrong frames got\n", right_frames, wrong_frames);
-            M5.Lcd.fillScreen(0);
-            M5.Lcd.setCursor(0, 0);
-            sprintf(msg_str, "id: 0x%02X\ttag: %u\ntimestamp: %u\ngyr: %f, %f, %f\nacc: %f, %f, %f\nmag: %f, %f, %f\n", imu_data.tag, imu_data.id, imu_data.timestamp, 
-              imu_data.gyr[0], imu_data.gyr[1], imu_data.gyr[2],
-              imu_data.acc[0], imu_data.acc[1], imu_data.acc[2],
-              imu_data.mag[0], imu_data.mag[1], imu_data.mag[2]);
-            M5.Lcd.print(msg_str);
-          }
-          
-          state = WAIT_FOR_HEADER1;
-          buf_index = 0;
-          length1 = 0;
-          length2 = 0;
-          length = 0;
-          crc1 = 0;
-          crc2 = 0;
-          crc = 0;
-
+          reset_receive_state();
         }
         break;
       default:
         break;
     }
-
-    // termPutchar(ch);
+    vTaskDelay(1 / portTICK_PERIOD_MS);
   }
+}
+
+void process_loop(void* param)
+{
+  HipNucIMU val;
+  while (1) {
+    if (xQueueReceive(imu_queue, &val, 0)) {
+      Serial.printf("Received: %u\n", val.timestamp);
+//      if((right_frames + wrong_frames) % 100 == 0)
+//      {
+//        Serial.printf("%u right frames got. %u wrong frames got\n", right_frames, wrong_frames);
+//        M5.Lcd.fillScreen(0);
+//        M5.Lcd.setCursor(0, 0);
+//        M5.Lcd.setTextSize(1);
+//        sprintf(msg_str, "id: 0x%02X tag: %u\ntimestamp: %u\ngyr: %f, %f, %f\nacc: %f, %f, %f\nmag: %f, %f, %f\ngood: %d, bad: %d\n", imu_data.tag, imu_data.id, imu_data.timestamp, 
+//          imu_data.gyr[0], imu_data.gyr[1], imu_data.gyr[2],
+//          imu_data.acc[0], imu_data.acc[1], imu_data.acc[2],
+//          imu_data.mag[0], imu_data.mag[1], imu_data.mag[2],
+//          right_frames, wrong_frames);
+//        M5.Lcd.print(msg_str);
+//        batt = M5.Power.getBatteryLevel();
+//        Serial.printf("power level: %u\n", batt);
+//      }
+    }
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
+}
+
+void setup() {
+    M5.begin();
+    M5.Power.begin();
+    IMURaw.begin(115200);
+    Serial.println("hello");
+    M5.Lcd.setTextFont(4);
+    M5.Lcd.println("IMU Raw Example");
+    imu_queue = xQueueCreate(2, sizeof(HipNucIMU));
+    if (imu_queue == NULL) {
+    Serial.println("Queue creation failed!");
+    } else {
+      Serial.println("Queue created.");
+    }
+    xTaskCreatePinnedToCore(receive_loop, "receiver", 2048, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(process_loop, "processor", 2048, NULL, 1, NULL, 1);
+}
+
+
+
+void loop()
+{
+  vTaskDelay(1 / portTICK_PERIOD_MS);
 }
