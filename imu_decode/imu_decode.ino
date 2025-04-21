@@ -55,7 +55,7 @@ void setup() {
     M5.Power.begin();
     IMURaw.begin(115200);
     Serial.println("hello");
-    termInit();
+//    termInit();
     M5.Lcd.setTextFont(4);
     M5.Lcd.println("IMU Raw Example");
 }
