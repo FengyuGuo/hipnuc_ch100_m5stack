@@ -1,3 +1,6 @@
 {
-  "ros.distro": "melodic"
+  "ros.distro": "melodic",
+  "files.associations": {
+    "*.ipp": "c"
+  }
 }
