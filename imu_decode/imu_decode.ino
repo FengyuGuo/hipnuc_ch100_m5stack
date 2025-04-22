@@ -1,9 +1,3 @@
-/*
-  please add TinyGPSPlus to your library first........
-  TinyGPSPlus file in M5stack lib examples -> modules -> GPS ->
-  TinyGPSPlus-1.0.2.zip
-*/
-
 #include <M5Stack.h>
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
