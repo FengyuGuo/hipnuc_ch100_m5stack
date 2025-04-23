@@ -190,6 +190,7 @@ void loop() {
         }
         Serial.printf("rtcm frame end! len: %u\n", len);
         rtcm_file.write(buffer, len + 3);
+        rtcm_file.flush();
         frames++;
         Serial.printf("writing %u frame to file\n", frames);
         reset_state();
