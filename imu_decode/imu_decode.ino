@@ -55,7 +55,7 @@ void setup() {
     M5.begin();
     M5.Power.begin();
     IMURaw.begin(115200);
-    Serial.println("hello");
+    Serial.println("imu example");
     M5.Lcd.setTextFont(4);
     M5.Lcd.println("IMU Raw Example");
     imu_q = xQueueCreate(10, sizeof(HipNucIMU));
